@@ -1,0 +1,9 @@
+name: swift
+channels:
+  - conda-forge
+dependencies:
+  - python=3.9
+  - selenium
+  - pandas
+  - numpy
+  - python-decouple
