@@ -1,4 +1,5 @@
 .env 
-*.csv*
-*.txt*
+*.csv
+*.txt
 chromedriver
+*.log
