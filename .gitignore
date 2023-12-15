@@ -1,5 +1,13 @@
+# configurations for website passwords and logins 
 .env 
 *.csv
 *.txt
+*.ipynb
+
+# data files and logs
+/log
+/dailyStream
+
 chromedriver
-*.log
+.DS_Store
+__pycache__
