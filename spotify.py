@@ -1,5 +1,7 @@
 import logging
 import concurrent.futures
+from threading import Barrier
+from functools import partial
 import json
 import os
 import csv
@@ -42,26 +44,27 @@ def createDriver():
         Therefore for each thread, we need to create a seperate webdriver
     """
     options = webdriver.ChromeOptions()
-    # The headless option doesn't seem to be supported for webscraping spotify blocks it?
+    # headless option use with caution can have authentication issues when multithreading and can be blocked
     # options.add_argument('--headless')
-    # options.add_argument('--disable-dev-shm-usage')
+    # options.add_experimental_option("detach", True)
     driver = webdriver.Chrome(options=options)
     return driver
 
 def addInput(driver: webdriver, by: By, value: str, text: str):
-    element = WebDriverWait(driver, 5).until(
+    element = WebDriverWait(driver, 10).until(
         EC.presence_of_element_located((by, value))
     )
+    element.clear()
     element.send_keys(text)
 
 #
 def clickButton(driver: webdriver, by: By, value: str):
-    button = WebDriverWait(driver, 5).until(
+    button = WebDriverWait(driver, 10).until(
         EC.element_to_be_clickable((by, value))
     )
     button.click()
 
-def loginSpotify(driver: webdriver): 
+def loginSpotify(driver: webdriver, barrier, maxRetries = 1): 
     """ 
         Spotify will redirect all attempts to webscraping to default login page. 
         Use Selenium to dynamically login and continue webscraping all the Global charts INFO
@@ -72,12 +75,27 @@ def loginSpotify(driver: webdriver):
     password = config("SPOTIFY_PASSWORD")
 
     # Go to login page, wait for page to load, config and simulate login
-    driver.get("https://accounts.spotify.com/en/login")
-    addInput(driver, by=By.ID, value='login-username', text=username)
-    addInput(driver, by=By.ID, value='login-password', text=password)
-    clickButton(driver, by=By.ID, value='login-button')
-    # Delay for button click to be processed and login processed
-    sleep(3)
+    for iter in range(maxRetries+1):
+        driver.get("https://accounts.spotify.com/en/login")
+        try:
+            addInput(driver, by=By.ID, value='login-username', text=username)
+            addInput(driver, by=By.ID, value='login-password', text=password)
+            clickButton(driver, by=By.ID, value='login-button')
+            # Delay for button click to be processed and login processed - adjust as needed
+            login = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, '[data-testid="status-logged-in"]'))
+            )
+            if login: 
+                barrier.wait()
+                scrapingLogger.debug("Successfully Login to spotify")
+                return 
+        except TimeoutException as e:
+            if iter < maxRetries:
+                 scrapingLogger.warning(f"Attempt {iter + 1}: Login webpage did not load. Retrying...")
+            else:
+                scrapingLogger.fatal("Maximum retries reached. Could not authenticate login.")
+                return  
+            
 
 def createDate(startDate: str, endDate: str, dateFormat: str = '%Y-%m-%d') -> list:
     """ 
@@ -97,11 +115,13 @@ def createDate(startDate: str, endDate: str, dateFormat: str = '%Y-%m-%d') -> li
 
     return dates
 
-def writeTop200Songs(input:str, filePath: str, mode: str, date: str, region: str):
+def writeTop200Charts(input:str, filePath: str, mode: str, date: str, region: str, type:str):
     '''
         Takes a string input -- the elements from the webpage -- 
         parses the inputs and writes to CSV file
-        
+        specify which type of chart -- only interested in daily song and artist
+        the table structure varies slightly across different charts modify accordingly
+
         Parameters: 
             filePath: specify name and location of file
             mode: "The mode of csv writer" 'a'(append) or 'w'(write)
@@ -112,17 +132,20 @@ def writeTop200Songs(input:str, filePath: str, mode: str, date: str, region: str
         if(match):
             # Parsing format follows: position, position_change, track_title, artist_name, 
             # and one line string containing space seperated values peak, prev, streak, streams
-            # Every 5 lines is a new song which should be an a new list
+            # Every 5 lines is a new song which should be an a new list -- varies based on chart page
             csvLogger.info("Pattern found: data parsing begins")
             data = list()
             entryIndex = -1
+            modBy = 4
+            if type == 'song': 
+                modBy = 5
 
             for i, entry in enumerate(input[match.start()+1:].split("\n")): 
-                if i % 5 == 0: 
+                if i % modBy == 0: 
                     data.append(list())
                     entryIndex +=1 
                     data[entryIndex].extend([date, region])
-                elif (i+1) % 5 == 0: 
+                elif (i+1) % modBy == 0: 
                     data[entryIndex].extend(entry.split(' '))
                     continue
                 data[entryIndex].append(entry)
@@ -131,8 +154,13 @@ def writeTop200Songs(input:str, filePath: str, mode: str, date: str, region: str
                 csvLogger.info(f"Writing to file {filePath} with '{mode}' status for {date} - {region}")
                 writer = csv.writer(file)
                 if(mode == 'w'): 
+                    # With multithreading it's unnecessary complex for write options but its here
+                    # it's easier to just add the headers manually before writing to file
                     header = ['date', 'region', 'position', 'change', 'track_title', 'artist_name',
                             'peak', 'prev', 'streak', 'streams']
+                    if type == 'artist': 
+                        header = ['date', 'region', 'position', 'change', 'artist_name',
+                            'peak', 'prev', 'streak']
                     writer.writerow(header)
                 # Write the data rows
                 writer.writerows(data)
@@ -153,7 +181,7 @@ def getChartElement(driver) -> str:
     try: 
         # Wait for the charts table to be present
         charts_table_selector = '[data-testid="charts-table"]'
-        WebDriverWait(driver, 5).until(
+        WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, charts_table_selector))
         )
         elements = driver.find_elements(By.CSS_SELECTOR, charts_table_selector)
@@ -161,8 +189,7 @@ def getChartElement(driver) -> str:
         scrapingLogger.info("Top 200 songs found and returned")
         return stringInput
     except TimeoutException as e: 
-        scrapingLogger.fatal("chart element not found -- page not loaded properly and or invalid navigation links" + 
-                             f'error message {str(e)}')
+        scrapingLogger.fatal("chart element not found -- page not loaded properly and or invalid navigation links")
         
 def writeRegions():
     ''' 
@@ -220,9 +247,18 @@ def writeRegions():
     except NoSuchElementException as e :
         scrapingLogger.fatal(str(e))
 
-def validRegions(regions:dict) -> list:
-    pass
-
+def validRegions(regions:dict, date:str) -> dict:
+    ''' 
+        Takes the regionDict and a date
+        Returns the valid regions based on specified date as a dictionary of region name: region abbreviation
+    '''
+    validRegions = dict()
+    
+    for region in regions.keys(): 
+        values = regions[region]
+        if values[1] <= date: 
+            validRegions[region] = values[0]
+    return validRegions
 
 def chartHelper(driver: webdriver, dates:list):
     ''' 
@@ -231,54 +267,87 @@ def chartHelper(driver: webdriver, dates:list):
         -- Currently aims to scrape the global charts starting from 2017
     '''
     # Fill in the actual url appended with the specified region and dates
-    filePath = "spotifyChartsNew2.csv"
+    filePath = "spotifyChartsTest.csv"
     region='global'
     startingDate = '2017-01-01'
-
-    # Navigate to SpotifyCharts and grab the top 200 songs for that day and region
     for date in dates: 
+        # Navigate to SpotifyCharts and grab the top 200 songs for that day and region
         url = f'https://charts.spotify.com/charts/view/regional-{region}-daily/{date}'
         driver.get(url)
         scrapingLogger.info(f'Begin webscraping Daily Songs Chart for {date} {region}')
         top200Songs = getChartElement(driver)
         # Create file and write the first files with header -- append on subsequent iterations
-        writeTop200Songs(top200Songs, filePath, 'w' if date == startingDate else 'a', date, region)
+        writeTop200Charts(top200Songs, filePath, 'w' if date == startingDate else 'a', date, region, 'song')
         scrapingLogger.info(f'Finished webscraping Daily Songs Chart for {date} {region}')
 
-def spotifyDebut():
-    pass 
+def spotifyDebut(driver:webdriver, dates:list, regionDict:dict):
+    '''
+        Get the performance of an album on Spotify Charts
+        Do some data cleaning to map songs to albums 
+        -- Full week performance across all avilable regions for release date
+    '''
+    dateFormat = '%Y-%m-%d'
+    filePath = 'spotifyDebutTest.csv'
+    for date in dates: 
+        print(date)
+        regions = validRegions(regionDict, date)
+        for region, abbr in regions.items():
+            # Get the whole week's data for album debut
+            incrementTime  = timedelta(days=6)
+            endDate = datetime.strftime(datetime.strptime(date, dateFormat) + incrementTime, dateFormat)
+            week = createDate(date, endDate)
+            for day in week: 
+                url = f'https://charts.spotify.com/charts/view/regional-{abbr}-daily/{day}'
+                driver.get(url)
+                scrapingLogger.info(f'Spotify Debut: begin webscraping Daily Songs Chart for {day} {region}')
+                top200Songs = getChartElement(driver)
+                # Create file and write the first files with header -- append on subsequent iterations
+                writeTop200Charts(top200Songs, filePath, 'a', day, region, 'song')
+                scrapingLogger.info(f'Finished webscraping Daily Songs Chart for {day} {region}')
 
-def artistRank(): 
-    pass
+
+def artistRank(driver:webdriver, dates:list, regionDict:dict): 
+    filePath = 'spotifyArtistRankNew.csv'
+    for date in dates: 
+        for region, abbr in regionDict.items(): 
+            url = f'https://charts.spotify.com/charts/view/artist-{abbr}-daily/{date}'
+            driver.get(url)
+            scrapingLogger.info(f'Begin webscraping Daily Artist Chart for {date} {region}')
+            top200Artist = getChartElement(driver)
+            writeTop200Charts(top200Artist, filePath, 'a', date, region, 'artist')
+            scrapingLogger.info(f'Finished webscraping Artist Songs Chart for {date} {region}')
 
 
 def main(): 
-
     jsonPath = 'region.json'
     if(not os.path.exists(jsonPath)): 
        writeRegions()
     with open(jsonPath, 'r') as json_file:
         regionDict = json.load(json_file)
-    print(regionDict)
+    # Initialize needed variables and split dates into n-thread-partitions 
+    startDate = '2022-01-27'
+    endDate = '2022-04-01'
+    #albumDates = ['2019-08-23','2020-7-24', '2020-12-11', '2021-04-09','2021-11-12', '2022-10-21', '2023-07-07', '2023-10-27']
+    dates = createDate(startDate, endDate)
+    nThreads = 2
+    # Not the best way but the most intuitive way to do this and avoid threading issues
+    nDates = len(dates)//nThreads
+    dates = [dates[i * nDates:(i + 1) * nDates] if i != nThreads-1 else dates[i * nDates:] for i in range(nThreads)]
+    barrier = Barrier(nThreads)
+    # Create n drivers for each thread
+    drivers = [createDriver() for _ in range(nThreads)]
 
-    # #Initialize needed variables and split dates into n-thread-partitions 
-    # startDate = '2021-08-02'
-    # endDate = '2023-12-13'
-    # dates = createDate(startDate, endDate)
-    # #dates = ['2020-06-11','2021-01-12', '2021-02-26', '2021-01-20', '2021-07-06', '2021-04-28', '2021-07-26', '2021-09-21','2021-11-18']
-    # nThreads = 2
-    # nDates = len(dates)//nThreads
-    # dates = [dates[i * nDates:(i + 1) * nDates] for i in range(nThreads)]
-    # drivers = [createDriver() for i in range(nThreads)]
-    # [loginSpotify(driver) for driver in drivers]
+    # For brevity just omit entries without spotify since it's launch of artist chart
+    artistRegions = validRegions(regionDict, '2021-10-21')
+    partialSpotifyDebut = partial(spotifyDebut, regionDict = regionDict)
+    partialArtistRank = partial(artistRank, regionDict = artistRegions)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=nThreads) as executor:
+        executor.map(lambda driver: loginSpotify(driver, barrier), drivers)
+        #executor.map(chartHelper, drivers, dates)
+        #executor.map(partialSpotifyDebut, drivers, dates)
+        executor.map(partialArtistRank, drivers, dates)
 
-    # with concurrent.futures.ThreadPoolExecutor(max_workers=nThreads) as executor:
-    #     executor.map(chartHelper, drivers, dates)
-
-    # [driver.quit() for driver in drivers]
-
-
-
+    [driver.quit() for driver in drivers] 
 
 if __name__ == "__main__":
         main()
