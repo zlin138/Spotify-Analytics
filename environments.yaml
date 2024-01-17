@@ -3,7 +3,9 @@ channels:
   - conda-forge
 dependencies:
   - python=3.9
-  - selenium
-  - pandas
-  - numpy
-  - python-decouple
+  - selenium = 4.15.2
+  - pandas = 2.1.3
+  - numpy = 1.26.2
+  - python-decouple = 3.8
+  - requests = 2.31.0
+  - bs4 = 4.12.2
