@@ -51,20 +51,32 @@ def createDriver():
     return driver
 
 def addInput(driver: webdriver, by: By, value: str, text: str):
-    element = WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located((by, value))
-    )
-    element.clear()
-    element.send_keys(text)
+    try:
+        element = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((by, value))
+        )
+        element.clear()
+        element.send_keys(text)
+    except: 
+        # This usually occurs when login is already processed so youre in the login portal 
+        scrapingLogger.debug('Already Logged In')
+        return
+
 
 #
 def clickButton(driver: webdriver, by: By, value: str):
-    button = WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable((by, value))
-    )
-    button.click()
+    try: 
+        button = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((by, value))
+        )
+        button.click()
+    except: 
+        # same logic as above
+        scrapingLogger.debug('Button clicked: Already loggin in')
+        return
 
-def loginSpotify(driver: webdriver, barrier, maxRetries = 1): 
+
+def loginSpotify(driver: webdriver, barrier, maxRetries = 2): 
     """ 
         Spotify will redirect all attempts to webscraping to default login page. 
         Use Selenium to dynamically login and continue webscraping all the Global charts INFO
@@ -260,14 +272,13 @@ def validRegions(regions:dict, date:str) -> dict:
             validRegions[region] = values[0]
     return validRegions
 
-def chartHelper(driver: webdriver, dates:list):
+def spotifyGlobalCharts(driver: webdriver, dates:list):
     ''' 
-        Helper function -- used to scrape a list of dates for multi-threading 
         Goes to spotify charts for a specific date and region and writes that to csv
         -- Currently aims to scrape the global charts starting from 2017
     '''
     # Fill in the actual url appended with the specified region and dates
-    filePath = "spotifyChartsTest.csv"
+    filePath = "spotifyCharts.csv"
     region='global'
     startingDate = '2017-01-01'
     for date in dates: 
@@ -287,7 +298,7 @@ def spotifyDebut(driver:webdriver, dates:list, regionDict:dict):
         -- Full week performance across all avilable regions for release date
     '''
     dateFormat = '%Y-%m-%d'
-    filePath = 'spotifyDebutTest.csv'
+    filePath = 'spotifyDebut.csv'
     for date in dates: 
         print(date)
         regions = validRegions(regionDict, date)
@@ -307,7 +318,7 @@ def spotifyDebut(driver:webdriver, dates:list, regionDict:dict):
 
 
 def artistRank(driver:webdriver, dates:list, regionDict:dict): 
-    filePath = 'spotifyArtistRankNew.csv'
+    filePath = 'spotifyArtistRank.csv'
     for date in dates: 
         for region, abbr in regionDict.items(): 
             url = f'https://charts.spotify.com/charts/view/artist-{abbr}-daily/{date}'
@@ -324,20 +335,25 @@ def main():
        writeRegions()
     with open(jsonPath, 'r') as json_file:
         regionDict = json.load(json_file)
+    
     # Initialize needed variables and split dates into n-thread-partitions 
-    startDate = '2022-01-27'
-    endDate = '2022-04-01'
+    startDate = '2021-10-21'
+    endDate = '2023-12-13'
+
     #albumDates = ['2019-08-23','2020-7-24', '2020-12-11', '2021-04-09','2021-11-12', '2022-10-21', '2023-07-07', '2023-10-27']
     dates = createDate(startDate, endDate)
-    nThreads = 2
+    nThreads = 4
+
     # Not the best way but the most intuitive way to do this and avoid threading issues
+
     nDates = len(dates)//nThreads
     dates = [dates[i * nDates:(i + 1) * nDates] if i != nThreads-1 else dates[i * nDates:] for i in range(nThreads)]
     barrier = Barrier(nThreads)
     # Create n drivers for each thread
     drivers = [createDriver() for _ in range(nThreads)]
 
-    # For brevity just omit entries without spotify since it's launch of artist chart
+    # For brevity just omit entries without spotify since it's launch of artist chart  
+    # Note it's also fairly simple to include the missing regions just need to loop this
     artistRegions = validRegions(regionDict, '2021-10-21')
     partialSpotifyDebut = partial(spotifyDebut, regionDict = regionDict)
     partialArtistRank = partial(artistRank, regionDict = artistRegions)
