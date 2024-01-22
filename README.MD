@@ -6,6 +6,7 @@ Install Anaconda and run this in the command line
 
 Create a .env file with the following attributes set
 > SPOTIFY_USERNAME = 
+
 > SPOTIFY_PASSWORD =
 
 ##### Code 
