@@ -5,9 +5,7 @@
 *.ipynb
 
 # data files and logs
-/log
-/dailyStream
-
+/log 
 chromedriver
 .DS_Store
 __pycache__

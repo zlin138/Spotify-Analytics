@@ -1,4 +1,4 @@
-name: swift
+name: spotify
 channels:
   - conda-forge
 dependencies:
